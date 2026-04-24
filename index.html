@@ -125,4 +125,782 @@ input[type=number]:focus{border-color:var(--accent);}
 </style>
 </head>
 <body>
+<div class="app">
 
+<header>
+  <div>
+    <div class="logo-title">DEADLOCK<span style="color:#ff4d6d">X</span></div>
+    <div class="logo-sub">AUTOMATED DEADLOCK DETECTION SYSTEM v3.0</div>
+  </div>
+  <div class="status-pill" id="status-pill" style="border-color:var(--dim);color:var(--dim)">
+    <div class="dot"></div><span id="status-text">IDLE</span>
+  </div>
+</header>
+
+<div class="mode-bar">
+  <button class="mode-btn active" id="btn-rag" onclick="setMode('rag')">
+    ◈&nbsp; SINGLE-INSTANCE &nbsp;·&nbsp; RAG Cycle Detection
+  </button>
+  <button class="mode-btn" id="btn-banker" onclick="setMode('banker')">
+    ⬡&nbsp; MULTI-INSTANCE &nbsp;·&nbsp; Banker's Algorithm
+  </button>
+</div>
+
+<div class="main-grid">
+
+  <!-- LEFT -->
+  <div>
+    <div class="panel">
+      <div class="panel-header">⚙ SYSTEM CONFIGURATION</div>
+      <div class="panel-body">
+        <label>PROCESSES (P)</label>
+        <input type="number" id="num-proc" value="4" min="2" max="8">
+        <label>RESOURCES (R)</label>
+        <input type="number" id="num-res" value="3" min="1" max="6">
+        <div class="preset-row" id="preset-row"></div>
+        <button class="btn btn-warn" onclick="generateMatrix()">GENERATE MATRIX</button>
+      </div>
+    </div>
+
+    <div class="panel" id="matrix-panel" style="display:none">
+      <div class="panel-header">▦ RESOURCE ALLOCATION MATRICES</div>
+      <div class="panel-body">
+        <div class="tab-bar" id="tab-bar"></div>
+        <div id="matrix-wrap"></div>
+        <div id="available-wrap" style="display:none;margin-top:12px">
+          <label>AVAILABLE RESOURCES (per type)</label>
+          <div class="avail-row" id="avail-inputs"></div>
+        </div>
+        <button class="btn btn-primary" onclick="runDetection()">▶ RUN DETECTION</button>
+        <button class="btn btn-secondary" onclick="clearResults()">✕ CLEAR</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div>
+    <!-- RAG canvas (shown in both modes) -->
+    <div class="panel" id="graph-panel">
+      <div class="panel-header" id="graph-panel-title">◈ RESOURCE ALLOCATION GRAPH (RAG)</div>
+      <div class="panel-body" style="padding:8px">
+        <div id="graph-container">
+          <canvas id="rag-canvas"></canvas>
+          <div class="canvas-hint">● circles = processes &nbsp;|&nbsp; ■ squares = resources</div>
+          <div class="drag-hint" id="drag-hint">✥ drag to rearrange</div>
+          <div class="mode-tag rag" id="mode-tag">SINGLE-INSTANCE · RAG</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Banker state tables (shown only in banker mode) -->
+    <div class="panel" id="banker-panel" style="display:none">
+      <div class="panel-header">⬡ BANKER'S ALGORITHM — SYSTEM STATE</div>
+      <div class="panel-body" style="overflow-x:auto">
+        <div id="banker-state-wrap">
+          <div style="color:var(--dim);font-family:var(--mono);font-size:12px;text-align:center;padding:28px 0">Run detection to see Banker's state tables</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div class="panel">
+      <div class="panel-header">◉ ANALYSIS RESULTS</div>
+      <div class="panel-body">
+        <div id="results-content">
+          <div style="color:var(--dim);font-family:var(--mono);font-size:12px;text-align:center;padding:18px 0">Configure system and run detection to see results</div>
+        </div>
+        <div id="algo-log"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════
+// GLOBAL STATE
+// ═══════════════════════════════════════════
+let mode     = 'rag';
+let nProc    = 4, nRes = 3;
+let allocated = [], requested = [], maxDemand = [], available = [];
+let activeTab = 'alloc';
+let lastCycles = null;
+let nodePositions = {};
+const NODE_R = 24, RES_HALF = 18;
+let drag = {active:false, nodeKey:null, ox:0, oy:0};
+
+// ═══════════════════════════════════════════
+// PRESETS
+// ═══════════════════════════════════════════
+const PRESETS = {
+  rag: {
+    deadlock:{label:'⚠ DEADLOCK',p:4,r:3,
+      alloc:[[1,0,0],[0,1,0],[0,0,1],[1,0,0]],
+      req:  [[0,1,0],[0,0,1],[1,0,0],[0,1,0]]},
+    safe:{label:'✓ SAFE',p:4,r:3,
+      alloc:[[0,1,0],[1,0,0],[0,0,1],[0,0,0]],
+      req:  [[0,0,0],[0,0,0],[0,0,0],[0,0,0]]},
+    complex:{label:'⚡ COMPLEX',p:5,r:4,
+      alloc:[[0,0,1,0],[2,0,0,1],[0,1,0,0],[1,0,0,1],[0,0,1,0]],
+      req:  [[0,1,0,1],[0,0,1,0],[1,0,0,1],[0,1,0,0],[1,0,0,1]]}
+  },
+  banker: {
+    classic:{label:'📖 CLASSIC',p:5,r:3,
+      alloc:    [[0,1,0],[2,0,0],[3,0,2],[2,1,1],[0,0,2]],
+      maxD:     [[7,5,3],[3,2,2],[9,0,2],[2,2,2],[4,3,3]],
+      avail:    [3,3,2]},
+    unsafe:{label:'⚠ UNSAFE',p:4,r:3,
+      alloc:    [[2,1,0],[3,0,2],[2,1,1],[0,2,1]],
+      maxD:     [[4,3,1],[6,2,3],[5,1,2],[3,4,2]],
+      avail:    [0,0,0]},
+    tight:{label:'🔬 TIGHT',p:3,r:4,
+      alloc:    [[0,0,1,2],[1,0,0,0],[1,3,5,4]],
+      maxD:     [[0,0,1,2],[1,7,5,0],[2,3,5,6]],
+      avail:    [1,5,2,0]}
+  }
+};
+
+// ═══════════════════════════════════════════
+// MODE
+// ═══════════════════════════════════════════
+function setMode(m) {
+  mode = m;
+  document.getElementById('btn-rag').classList.toggle('active',    m==='rag');
+  document.getElementById('btn-banker').classList.toggle('active', m==='banker');
+  document.getElementById('banker-panel').style.display  = m==='banker' ? '' : 'none';
+
+  const tag = document.getElementById('mode-tag');
+  const gpTitle = document.getElementById('graph-panel-title');
+  const dHint = document.getElementById('drag-hint');
+  if (m==='rag') {
+    tag.textContent='SINGLE-INSTANCE · RAG'; tag.className='mode-tag rag';
+    gpTitle.textContent='◈ RESOURCE ALLOCATION GRAPH (RAG)';
+    dHint.style.display='';
+  } else {
+    tag.textContent="MULTI-INSTANCE · BANKER'S"; tag.className='mode-tag banker';
+    gpTitle.textContent='◈ RESOURCE ALLOCATION GRAPH — MULTI-INSTANCE VIEW';
+    dHint.style.display='none';
+  }
+
+  allocated=[]; requested=[]; maxDemand=[]; available=[];
+  nodePositions={}; lastCycles=null;
+  document.getElementById('matrix-panel').style.display='none';
+  document.getElementById('banker-state-wrap').innerHTML=
+    `<div style="color:var(--dim);font-family:var(--mono);font-size:12px;text-align:center;padding:28px 0">Run detection to see Banker's state tables</div>`;
+  clearResults();
+  buildPresets();
+  if (m==='rag') { initPositions(); drawRAG(); }
+  else           { clearCanvas(); }
+}
+
+function buildPresets() {
+  document.getElementById('preset-row').innerHTML =
+    Object.entries(PRESETS[mode]).map(([k,p])=>
+      `<button class="preset-btn" onclick="loadPreset('${k}')">${p.label}</button>`).join('');
+}
+
+// ═══════════════════════════════════════════
+// LOAD / GENERATE
+// ═══════════════════════════════════════════
+function loadPreset(key) {
+  const p = PRESETS[mode][key];
+  nProc=p.p; nRes=p.r;
+  document.getElementById('num-proc').value=p.p;
+  document.getElementById('num-res').value=p.r;
+  allocated = p.alloc.map(r=>[...r]);
+  if (mode==='rag') {
+    requested=p.req.map(r=>[...r]); maxDemand=[]; available=[];
+  } else {
+    maxDemand=p.maxD.map(r=>[...r]);
+    available=[...p.avail];
+    recomputeNeed();
+  }
+  nodePositions={}; lastCycles=null;
+  document.getElementById('matrix-panel').style.display='block';
+  activeTab='alloc';
+  renderAll(); initPositions(); drawRAG();
+}
+
+function generateMatrix() {
+  nProc=Math.min(8,Math.max(2,parseInt(document.getElementById('num-proc').value)||4));
+  nRes =Math.min(6,Math.max(1,parseInt(document.getElementById('num-res').value)||3));
+  allocated =Array.from({length:nProc},()=>Array(nRes).fill(0));
+  requested =Array.from({length:nProc},()=>Array(nRes).fill(0));
+  maxDemand =Array.from({length:nProc},()=>Array(nRes).fill(0));
+  available =Array(nRes).fill(0);
+  nodePositions={}; lastCycles=null;
+  document.getElementById('matrix-panel').style.display='block';
+  activeTab='alloc';
+  clearResults(); renderAll(); initPositions(); drawRAG();
+}
+
+// ═══════════════════════════════════════════
+// MATRIX RENDERING
+// ═══════════════════════════════════════════
+function renderAll() {
+  if (mode==='rag') renderRAG(); else renderBanker();
+}
+
+/* ─── RAG ─── */
+function renderRAG() {
+  const tabs = ['alloc','req'];
+  if (!tabs.includes(activeTab)) activeTab='alloc';
+  document.getElementById('tab-bar').innerHTML = tabs.map(t=>
+    `<div class="tab ${activeTab===t?'active':''}" onclick="switchTab('${t}')">${t==='alloc'?'ALLOCATED':'REQUESTED'}</div>`).join('');
+  document.getElementById('available-wrap').style.display='none';
+  document.getElementById('matrix-wrap').innerHTML =
+    buildToggle(activeTab==='alloc'?allocated:requested, activeTab);
+}
+
+function buildToggle(matrix, type) {
+  let h=`<div style="overflow-x:auto"><table class="mx-table"><tr><th></th>`;
+  for(let r=0;r<nRes;r++) h+=`<th>R${r}</th>`;
+  h+=`</tr>`;
+  for(let p=0;p<nProc;p++) {
+    h+=`<tr><td class="mx-pl">P${p}</td>`;
+    for(let r=0;r<nRes;r++){
+      const v=matrix[p][r], cls=v>0?(type==='alloc'?'ac':'rc'):'';
+      h+=`<td><button class="mx-cell ${cls}" onclick="toggleRAG('${type}',${p},${r})">${v}</button></td>`;
+    }
+    h+=`</tr>`;
+  }
+  h+=`</table></div><p style="font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:6px;text-align:center">Click to toggle 0 / 1</p>`;
+  return h;
+}
+
+function toggleRAG(type,p,r) {
+  if(type==='alloc') allocated[p][r]=allocated[p][r]>0?0:1;
+  else               requested[p][r]=requested[p][r]>0?0:1;
+  renderRAG(); drawRAG(lastCycles);
+}
+
+/* ─── Banker ─── */
+function renderBanker() {
+  const tabs=['alloc','max','need'];
+  if(!tabs.includes(activeTab)) activeTab='alloc';
+  document.getElementById('tab-bar').innerHTML=tabs.map(t=>
+    `<div class="tab ${activeTab===t?'active':''}" onclick="switchTab('${t}')">${t.toUpperCase()}</div>`).join('');
+  if(available.length!==nRes) available=Array(nRes).fill(0);
+
+  let wrap='';
+  if(activeTab==='alloc') wrap=buildNumber(allocated,'alloc','ac');
+  else if(activeTab==='max') wrap=buildNumber(maxDemand,'max','mc');
+  else wrap=buildNeed();
+  document.getElementById('matrix-wrap').innerHTML=wrap;
+
+  document.getElementById('available-wrap').style.display='';
+  document.getElementById('avail-inputs').innerHTML=
+    Array.from({length:nRes},(_,r)=>`
+      <div class="avail-item">
+        <div class="avail-lbl">R${r}</div>
+        <input class="avail-inp" type="number" min="0" value="${available[r]}"
+          onchange="available[${r}]=Math.max(0,parseInt(this.value)||0)">
+      </div>`).join('');
+}
+
+function buildNumber(matrix,type,cellCls) {
+  let h=`<div style="overflow-x:auto"><table class="mx-table"><tr><th></th>`;
+  for(let r=0;r<nRes;r++) h+=`<th>R${r}</th>`;
+  h+=`</tr>`;
+  for(let p=0;p<nProc;p++){
+    h+=`<tr><td class="mx-pl">P${p}</td>`;
+    for(let r=0;r<nRes;r++){
+      const v=matrix[p][r], cls=v>0?cellCls:'';
+      h+=`<td><input class="mx-cell ${cls}" type="number" min="0" value="${v}"
+        onchange="updMx('${type}',${p},${r},this.value)" style="width:38px;height:30px;padding:0;text-align:center"></td>`;
+    }
+    h+=`</tr>`;
+  }
+  h+=`</table></div>`;
+  return h;
+}
+
+function buildNeed() {
+  let h=`<div style="overflow-x:auto"><table class="mx-table"><tr><th></th>`;
+  for(let r=0;r<nRes;r++) h+=`<th>R${r}</th>`;
+  h+=`</tr>`;
+  for(let p=0;p<nProc;p++){
+    h+=`<tr><td class="mx-pl">P${p}</td>`;
+    for(let r=0;r<nRes;r++){
+      const v=Math.max(0,(maxDemand[p]?.[r]||0)-(allocated[p]?.[r]||0));
+      h+=`<td><button class="mx-cell rc" style="cursor:default">${v}</button></td>`;
+    }
+    h+=`</tr>`;
+  }
+  h+=`</table></div><p style="font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:6px;text-align:center">Need = Max − Allocated (read-only)</p>`;
+  return h;
+}
+
+function updMx(type,p,r,val) {
+  const v=Math.max(0,parseInt(val)||0);
+  if(type==='alloc') { allocated[p][r]=v; }
+  if(type==='max')   { maxDemand[p][r]=v; }
+  recomputeNeed(); renderBanker(); drawRAG(lastCycles);
+}
+
+function recomputeNeed() {
+  requested=maxDemand.map((row,i)=>row.map((v,j)=>Math.max(0,v-(allocated[i]?.[j]||0))));
+}
+
+function switchTab(t) { activeTab=t; renderAll(); }
+
+// ═══════════════════════════════════════════
+// DETECTION ROUTER
+// ═══════════════════════════════════════════
+function runDetection() {
+  if(mode==='rag') runRAG(); else runBankers();
+}
+
+// ═══════════════════════════════════════════
+// RAG DETECTION
+// ═══════════════════════════════════════════
+function runRAG() {
+  const log=[];
+  log.push({t:'info',m:`RAG detection: ${nProc}P × ${nRes}R`});
+  const N=nProc+nRes, adj=Array.from({length:N},()=>[]);
+  for(let p=0;p<nProc;p++) for(let r=0;r<nRes;r++){
+    if(requested[p][r]>0){adj[p].push(nProc+r);log.push({t:'step',m:`P${p}→R${r} (request)`});}
+    if(allocated[p][r]>0){adj[nProc+r].push(p);log.push({t:'step',m:`R${r}→P${p} (alloc)`});}
+  }
+  const cycles=[],visited=new Array(N).fill(false),inStack=new Array(N).fill(false),path=[];
+  function dfs(n){
+    visited[n]=true;inStack[n]=true;path.push(n);
+    for(const nb of adj[n]){
+      if(!visited[nb]) dfs(nb);
+      else if(inStack[nb]){
+        const ci=path.indexOf(nb);
+        if(ci!==-1){
+          const c=path.slice(ci);
+          if(c.some(x=>x<nProc)&&c.some(x=>x>=nProc)){
+            const sig=[...c].sort().join(',');
+            if(!cycles.some(x=>[...x].sort().join(',')===sig)) cycles.push([...c]);
+          }
+        }
+      }
+    }
+    path.pop();inStack[n]=false;
+  }
+  for(let i=0;i<N;i++) if(!visited[i]) dfs(i);
+  const dead=cycles.length>0;
+  lastCycles=dead?cycles:null;
+  setStatus(dead?'danger':'safe',dead?'DEADLOCK DETECTED':'SYSTEM SAFE');
+  showRAGResults(dead,cycles);
+  drawRAG(lastCycles);
+  renderLog(log,dead?'deadlock':'safe');
+}
+
+function showRAGResults(dead,cycles){
+  const el=document.getElementById('results-content');
+  if(!dead){
+    el.innerHTML=`<div class="safe-msg"><span style="font-size:22px">✓</span>
+      <div><div style="font-size:14px;font-weight:700;margin-bottom:3px">NO DEADLOCK DETECTED</div>
+      <div style="font-size:12px;opacity:.7">No circular wait conditions found in the RAG.</div></div></div>`;
+    return;
+  }
+  let h=`<div class="result-title danger">⚠ ${cycles.length} DEADLOCK CYCLE${cycles.length>1?'S':''} DETECTED</div>`;
+  cycles.forEach((c,i)=>{
+    const path=c.map(n=>n<nProc?`P${n}`:`R${n-nProc}`).join('→')+'→'+(c[0]<nProc?`P${c[0]}`:`R${c[0]-nProc}`);
+    const procs=c.filter(n=>n<nProc).map(n=>`P${n}`);
+    const res  =c.filter(n=>n>=nProc).map(n=>`R${n-nProc}`);
+    h+=`<div class="cycle-card">
+      <div style="font-size:10px;font-family:var(--mono);color:var(--dim);margin-bottom:4px">CYCLE #${i+1}</div>
+      <div class="cycle-path">${path}</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--dim);margin-bottom:7px">Procs: ${procs.join(', ')} | Res: ${res.join(', ')}</div>
+      <ul class="res-list">
+        <li>Preempt ${res[0]||'R0'} from ${procs[procs.length-1]||'P0'} to break the cycle</li>
+        <li>Terminate ${procs[i%procs.length]||'P0'} to release all its held resources</li>
+        <li>Enforce ordering: processes must request resources in ascending index order</li>
+      </ul></div>`;
+  });
+  h+=`<div style="margin-top:12px"><div class="result-title warn">PREVENTION</div>
+    <ul class="res-list">
+      <li>Switch to <b>Multi-Instance / Banker's mode</b> for safe-state avoidance</li>
+      <li><b>Timeout & Rollback:</b> release all resources on timeout</li>
+    </ul></div>`;
+  el.innerHTML=h;
+}
+
+// ═══════════════════════════════════════════
+// BANKER'S ALGORITHM
+// ═══════════════════════════════════════════
+function runBankers(){
+  const log=[];
+  log.push({t:'info',m:`Banker's Algo: ${nProc}P × ${nRes}R`});
+  recomputeNeed();
+
+  // Validate: need must be ≥ 0
+  for(let p=0;p<nProc;p++) for(let r=0;r<nRes;r++)
+    if((maxDemand[p]?.[r]||0)<(allocated[p]?.[r]||0)){
+      log.push({t:'err',m:`P${p}: Allocated[R${r}] > Max[R${r}] — invalid!`});
+      setStatus('danger','INVALID INPUT');
+      renderLog(log,'invalid'); return;
+    }
+
+  const work=[...available];
+  const finish=new Array(nProc).fill(false);
+  const safeSeq=[], steps=[];
+  log.push({t:'info',m:`Available: [${available.join(',')}]`});
+
+  let changed=true;
+  while(changed){
+    changed=false;
+    for(let p=0;p<nProc;p++){
+      if(finish[p]) continue;
+      const need=requested[p];
+      const canRun=need.every((n,r)=>n<=work[r]);
+      if(canRun){
+        const wb=[...work];
+        work.forEach((_,r)=>{work[r]+=allocated[p][r];});
+        finish[p]=true; safeSeq.push(p); changed=true;
+        log.push({t:'ok',m:`P${p} runs — Need:[${need.join(',')}]≤Work:[${wb.join(',')}] → Work:[${work.join(',')}]`});
+        steps.push({proc:p,need:[...need],wb,wa:[...work],ok:true});
+      }
+    }
+  }
+
+  const blocked=[];
+  for(let p=0;p<nProc;p++) if(!finish[p]){
+    blocked.push(p);
+    log.push({t:'err',m:`P${p} BLOCKED — Need:[${requested[p].join(',')}] cannot be satisfied`});
+    steps.push({proc:p,need:[...requested[p]],wb:[...work],wa:[...work],ok:false});
+  }
+
+  const safe=finish.every(Boolean);
+  lastCycles=null;
+  setStatus(safe?'safe':'danger',safe?'SAFE STATE':"UNSAFE — DEADLOCK RISK");
+  showBankerResults(safe,safeSeq,blocked,work);
+  renderBankerState(steps,safeSeq,blocked);
+  drawRAG(null);
+  renderLog(log,safe?'safe':'deadlock');
+}
+
+function showBankerResults(safe,seq,blocked,finalWork){
+  const el=document.getElementById('results-content');
+  if(safe){
+    const seqHtml=seq.map((p,i)=>
+      `<span class="seq-node">P${p}</span>${i<seq.length-1?'<span class="seq-arrow">→</span>':''}`).join('');
+    el.innerHTML=`
+      <div class="safe-msg"><span style="font-size:22px">✓</span>
+        <div><div style="font-size:14px;font-weight:700;margin-bottom:3px">SAFE STATE — NO DEADLOCK POSSIBLE</div>
+        <div style="font-size:12px;opacity:.7">A valid safe execution sequence exists.</div></div>
+      </div>
+      <div style="margin-top:14px"><div class="result-title safe">SAFE SEQUENCE</div>
+        <div class="safe-seq">${seqHtml}</div>
+      </div>
+      <div style="margin-top:14px"><div class="result-title safe">SUMMARY</div>
+        <ul class="res-list">
+          <li>All ${seq.length} processes complete in order: ${seq.map(p=>`P${p}`).join(' → ')}</li>
+          <li>Final work vector: [${finalWork.join(', ')}]</li>
+          <li>No circular wait possible — system is in a safe state</li>
+        </ul>
+      </div>`;
+  } else {
+    el.innerHTML=`
+      <div class="danger-msg">
+        <span style="font-size:22px">⚠</span>
+        <div><div style="font-family:var(--head);font-size:13px;color:var(--accent2);margin-bottom:3px">UNSAFE STATE — DEADLOCK RISK</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--dim)">No safe sequence exists for all processes.</div></div>
+      </div>
+      <div class="result-title danger">BLOCKED PROCESSES</div>
+      <div style="font-family:var(--mono);font-size:12px;color:var(--accent2);margin-bottom:10px">${blocked.map(p=>`P${p}`).join(', ')} — resource needs cannot be met</div>
+      <div class="result-title warn">PARTIAL SEQUENCE</div>
+      <div style="font-family:var(--mono);font-size:12px;color:var(--warn);margin-bottom:12px">${seq.length?seq.map(p=>`P${p}`).join(' → '):'(none)'}</div>
+      <div class="result-title warn">RESOLUTION STRATEGIES</div>
+      <ul class="res-list">
+        <li><b>Add Resources:</b> Increase available vector so blocked processes can run</li>
+        <li><b>Preempt & Rollback:</b> Force-release resources from a blocked process and restart it</li>
+        <li><b>Kill Process:</b> Terminate ${blocked.map(p=>`P${p}`).join(' or ')} to free held resources</li>
+        <li><b>Reduce Max Claim:</b> Renegotiate maximum demand of blocked processes</li>
+      </ul>`;
+  }
+}
+
+function renderBankerState(steps,safeSeq,blocked){
+  const wrap=document.getElementById('banker-state-wrap');
+  const rL=Array.from({length:nRes},(_,r)=>`R${r}`);
+
+  // Main state table
+  let h=`<div style="overflow-x:auto"><table class="step-table">
+    <tr><th>Process</th>`;
+  rL.forEach(r=>h+=`<th>Alloc ${r}</th>`);
+  rL.forEach(r=>h+=`<th>Max ${r}</th>`);
+  rL.forEach(r=>h+=`<th>Need ${r}</th>`);
+  h+=`<th>Status</th></tr>`;
+
+  for(let p=0;p<nProc;p++){
+    const fin=safeSeq.includes(p), blk=blocked.includes(p);
+    const seqPos=safeSeq.indexOf(p);
+    h+=`<tr class="${fin?'finished':blk?'blocked':''}">
+      <td style="color:var(--accent);font-weight:700">P${p}</td>`;
+    for(let r=0;r<nRes;r++) h+=`<td>${allocated[p][r]}</td>`;
+    for(let r=0;r<nRes;r++) h+=`<td>${maxDemand[p]?.[r]||0}</td>`;
+    for(let r=0;r<nRes;r++) h+=`<td>${requested[p]?.[r]||0}</td>`;
+    h+=`<td style="font-weight:700">${fin?`<span style="color:var(--accent3)">✓ #${seqPos+1}</span>`:blk?`<span style="color:var(--accent2)">✗ BLOCKED</span>`:'–'}</td></tr>`;
+  }
+  h+=`</table></div>`;
+
+  // Info row
+  h+=`<div class="info-grid" style="margin-top:12px">
+    <div class="info-box">
+      <div class="info-box-lbl">AVAILABLE (initial)</div>
+      <div class="info-box-val">[${available.join(', ')}]</div>
+    </div>
+    <div class="info-box">
+      <div class="info-box-lbl">SAFE SEQUENCE</div>
+      <div class="info-box-val" style="color:${safeSeq.length===nProc?'var(--accent3)':'var(--accent2)'}">
+        ${safeSeq.length===nProc?safeSeq.map(p=>`P${p}`).join(' → '):'UNSAFE STATE'}
+      </div>
+    </div>
+  </div>`;
+
+  // Step-by-step trace
+  if(steps.length>0){
+    h+=`<div style="margin-top:10px;font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:1px;margin-bottom:5px">STEP-BY-STEP SAFETY ALGORITHM TRACE</div>`;
+    h+=`<div style="overflow-x:auto"><table class="step-table">
+      <tr><th>Step</th><th>P</th>`;
+    rL.forEach(r=>h+=`<th>Need ${r}</th>`);
+    rL.forEach(r=>h+=`<th>Work↑${r}</th>`);
+    rL.forEach(r=>h+=`<th>Work↓${r}</th>`);
+    h+=`<th>Result</th></tr>`;
+    steps.forEach((s,i)=>{
+      h+=`<tr class="${s.ok?'finished':'blocked'}">
+        <td>${i+1}</td><td style="color:var(--accent);font-weight:700">P${s.proc}</td>`;
+      s.need.forEach(v=>h+=`<td>${v}</td>`);
+      s.wb.forEach(v=>h+=`<td>${v}</td>`);
+      s.wa.forEach(v=>h+=`<td>${v}</td>`);
+      h+=`<td>${s.ok?`<span style="color:var(--accent3)">RUNS</span>`:`<span style="color:var(--accent2)">BLOCKED</span>`}</td></tr>`;
+    });
+    h+=`</table></div>`;
+  }
+
+  wrap.innerHTML=h;
+}
+
+// ═══════════════════════════════════════════
+// STATUS / LOG / CLEAR
+// ═══════════════════════════════════════════
+function setStatus(type,text){
+  document.getElementById('status-pill').className='status-pill '+type;
+  document.getElementById('status-text').textContent=text;
+}
+function renderLog(log,result){
+  const map={info:'log-info',ok:'log-ok',err:'log-err',step:'log-step',warn:'log-warn'};
+  let h=log.map(e=>`<div class="${map[e.t]||'log-step'}">&gt; ${e.m}</div>`).join('');
+  if(result==='safe')     h+=`<div class="log-ok">&gt; RESULT: SAFE STATE CONFIRMED</div>`;
+  else if(result==='deadlock') h+=`<div class="log-err">&gt; RESULT: DEADLOCK / UNSAFE STATE</div>`;
+  else if(result==='invalid')  h+=`<div class="log-err">&gt; RESULT: INVALID INPUT</div>`;
+  const el=document.getElementById('algo-log');
+  el.innerHTML=h; el.scrollTop=el.scrollHeight;
+}
+function clearResults(){
+  document.getElementById('results-content').innerHTML=
+    `<div style="color:var(--dim);font-family:var(--mono);font-size:12px;text-align:center;padding:18px 0">Configure system and run detection to see results</div>`;
+  document.getElementById('algo-log').innerHTML='';
+  document.getElementById('status-pill').className='status-pill';
+  document.getElementById('status-pill').style='border-color:var(--dim);color:var(--dim)';
+  document.getElementById('status-text').textContent='IDLE';
+  lastCycles=null;
+  if(mode==='rag') drawRAG();
+  else {
+    document.getElementById('banker-state-wrap').innerHTML=
+      `<div style="color:var(--dim);font-family:var(--mono);font-size:12px;text-align:center;padding:28px 0">Run detection to see Banker's state tables</div>`;
+    drawRAG(null);
+  }
+}
+
+// ═══════════════════════════════════════════
+// NODE POSITIONS
+// ═══════════════════════════════════════════
+function initPositions(){
+  const c=document.getElementById('rag-canvas');
+  const W=c.clientWidth||700,H=c.clientHeight||490;
+  const cx=W/2,cy=H/2;
+  for(let p=0;p<nProc;p++){
+    const k=`P${p}`;
+    if(!nodePositions[k]){
+      const a=(p/nProc)*2*Math.PI-Math.PI/2;
+      nodePositions[k]={x:cx*0.56+Math.cos(a)*cx*0.44,y:cy+Math.sin(a)*cy*0.72};
+    }
+  }
+  for(let r=0;r<nRes;r++){
+    const k=`R${r}`;
+    if(!nodePositions[k]){
+      const a=(r/nRes)*2*Math.PI-Math.PI/2;
+      nodePositions[k]={x:cx*1.52+Math.cos(a)*cx*0.30,y:cy+Math.sin(a)*cy*0.64};
+    }
+  }
+}
+
+// ═══════════════════════════════════════════
+// DRAG
+// ═══════════════════════════════════════════
+function gcp(e){
+  const c=document.getElementById('rag-canvas'),r=c.getBoundingClientRect();
+  const cx=e.touches?e.touches[0].clientX:e.clientX;
+  const cy=e.touches?e.touches[0].clientY:e.clientY;
+  return{x:(cx-r.left)*(c.width/r.width),y:(cy-r.top)*(c.height/r.height)};
+}
+function hitTest(mx,my){
+  for(let p=0;p<nProc;p++){const pos=nodePositions[`P${p}`];if(!pos)continue;const dx=mx-pos.x,dy=my-pos.y;if(Math.sqrt(dx*dx+dy*dy)<=NODE_R)return`P${p}`;}
+  for(let r=0;r<nRes;r++){const pos=nodePositions[`R${r}`];if(!pos)continue;if(Math.abs(mx-pos.x)<=RES_HALF&&Math.abs(my-pos.y)<=RES_HALF)return`R${r}`;}
+  return null;
+}
+function onPD(e){
+  const {x,y}=gcp(e),k=hitTest(x,y);
+  if(k){drag={active:true,nodeKey:k,ox:x-nodePositions[k].x,oy:y-nodePositions[k].y};
+    document.getElementById('rag-canvas').classList.add('dragging');e.preventDefault();}
+}
+function onPM(e){
+  const c=document.getElementById('rag-canvas'),{x,y}=gcp(e);
+  if(drag.active&&drag.nodeKey){
+    const pad=30;
+    nodePositions[drag.nodeKey]={x:Math.max(pad,Math.min(c.width-pad,x-drag.ox)),y:Math.max(pad,Math.min(c.height-pad,y-drag.oy))};
+    drawRAG(lastCycles);e.preventDefault();
+  }else{c.classList.toggle('hovering',!!hitTest(x,y));}
+}
+function onPU(){drag={active:false,nodeKey:null,ox:0,oy:0};document.getElementById('rag-canvas').classList.remove('dragging');}
+
+// ═══════════════════════════════════════════
+// CANVAS DRAW
+// ═══════════════════════════════════════════
+function clearCanvas(){
+  const c=document.getElementById('rag-canvas'),cont=document.getElementById('graph-container');
+  c.width=cont.clientWidth;c.height=cont.clientHeight;
+  c.getContext('2d').clearRect(0,0,c.width,c.height);
+}
+
+function drawRAG(deadlockCycles){
+  const canvas=document.getElementById('rag-canvas'),cont=document.getElementById('graph-container');
+  canvas.width=cont.clientWidth;canvas.height=cont.clientHeight;
+  const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
+  ctx.clearRect(0,0,W,H);
+  if(!allocated.length){return;}
+  initPositions();
+
+  const dlN=new Set();
+  if(deadlockCycles) deadlockCycles.forEach(c=>c.forEach(n=>dlN.add(n)));
+
+  // Edges
+  for(let p=0;p<nProc;p++) for(let r=0;r<nRes;r++){
+    const isDL=deadlockCycles&&deadlockCycles.some(c=>{
+      for(let i=0;i<c.length;i++){const a=c[i],b=c[(i+1)%c.length];if((a===p&&b===nProc+r)||(a===nProc+r&&b===p))return true;}return false;});
+    const pp=nodePositions[`P${p}`],rp=nodePositions[`R${r}`];
+    if(!pp||!rp) continue;
+
+    // For multi-instance: show number of allocated units as edge label
+    if(allocated[p][r]>0){
+      const cnt=allocated[p][r];
+      for(let k=0;k<Math.min(cnt,3);k++){
+        const off=(k-(Math.min(cnt,3)-1)/2)*6;
+        drawArrowOffset(ctx,rp,pp,isDL?'#ff4d6d':'#00e5ff',isDL?2.5:1.5,false,isDL,RES_HALF,NODE_R,off);
+      }
+      if(cnt>1){  // label count
+        const mx=(rp.x+pp.x)/2,my=(rp.y+pp.y)/2;
+        ctx.font='10px Share Tech Mono';
+        ctx.fillStyle=(isDL?'#ff4d6d':'#00e5ff')+'cc';
+        ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText(`×${cnt}`,mx,my-10);
+      }
+    }
+    if(requested[p][r]>0){
+      drawArrowOffset(ctx,pp,rp,isDL?'#ff4d6d':'#ffb800',isDL?2.5:1.5,true,isDL,NODE_R,RES_HALF,0);
+      if(mode==='banker'&&requested[p][r]>1){
+        const mx=(pp.x+rp.x)/2,my=(pp.y+rp.y)/2;
+        ctx.font='10px Share Tech Mono';ctx.fillStyle='#ffb800cc';ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText(`×${requested[p][r]}`,mx,my-10);
+      }
+    }
+  }
+
+  // Process circles
+  for(let p=0;p<nProc;p++){
+    const pos=nodePositions[`P${p}`],isDL=dlN.has(p);
+    const color=isDL?'#ff4d6d':'#00e5ff',fill=isDL?'#ff4d6d22':'#00e5ff11';
+    if(isDL){ctx.beginPath();ctx.arc(pos.x,pos.y,NODE_R+7,0,Math.PI*2);ctx.strokeStyle='#ff4d6d33';ctx.lineWidth=1.5;ctx.stroke();}
+    ctx.beginPath();ctx.arc(pos.x,pos.y,NODE_R,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill();
+    if(isDL){ctx.shadowColor=color;ctx.shadowBlur=14;}
+    ctx.strokeStyle=color;ctx.lineWidth=isDL?2.5:1.5;ctx.stroke();ctx.shadowBlur=0;
+    ctx.fillStyle=color;ctx.font='bold 12px Share Tech Mono';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(`P${p}`,pos.x,pos.y);
+    // alloc total badge in banker mode
+    if(mode==='banker'){
+      const tot=allocated[p]?.reduce((s,v)=>s+v,0)||0;
+      if(tot>0){ctx.font='9px Share Tech Mono';ctx.fillStyle=color+'99';ctx.fillText(`Σ${tot}`,pos.x,pos.y+NODE_R+11);}
+    }
+  }
+
+  // Resource squares
+  for(let r=0;r<nRes;r++){
+    const pos=nodePositions[`R${r}`],isDL=dlN.has(nProc+r);
+    const color=isDL?'#ff4d6d':'#39ff14',fill=isDL?'#ff4d6d22':'#39ff1411',sq=RES_HALF*2;
+    ctx.beginPath();ctx.rect(pos.x-RES_HALF,pos.y-RES_HALF,sq,sq);ctx.fillStyle=fill;ctx.fill();
+    if(isDL){ctx.shadowColor=color;ctx.shadowBlur=14;}
+    ctx.strokeStyle=color;ctx.lineWidth=isDL?2.5:1.5;ctx.stroke();ctx.shadowBlur=0;
+    ctx.fillStyle=color;ctx.font='bold 12px Share Tech Mono';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(`R${r}`,pos.x,pos.y);
+
+    if(mode==='banker'){
+      // total instances = available + sum(alloc)
+      const tot=(available[r]||0)+allocated.reduce((s,row)=>s+(row[r]||0),0);
+      ctx.font='9px Share Tech Mono';ctx.fillStyle=color+'99';
+      ctx.fillText(`total:${tot}`,pos.x+RES_HALF+12,pos.y-5);
+      ctx.fillStyle='#39ff14aa';
+      ctx.fillText(`avail:${available[r]||0}`,pos.x+RES_HALF+12,pos.y+7);
+    } else {
+      const ac=allocated.reduce((s,row)=>s+(row[r]||0),0);
+      if(ac>0){ctx.font='9px Share Tech Mono';ctx.fillStyle=color+'99';ctx.fillText(`×${ac}`,pos.x+RES_HALF+10,pos.y-3);}
+    }
+  }
+
+  // Legend
+  ctx.font='10px Share Tech Mono';
+  ctx.fillStyle='#00e5ff88';ctx.fillText('── assigned (R→P)',14,H-38);
+  ctx.fillStyle='#ffb80088';ctx.fillText('- - request (P→R)',14,H-22);
+  if(mode==='rag'){ctx.fillStyle='#ff4d6d88';ctx.fillText('● deadlock cycle',14,H-8);}
+  else{ctx.fillStyle='#39ff1488';ctx.fillText('total/avail = resource instances',14,H-8);}
+}
+
+function drawArrowOffset(ctx,from,to,color,width,dashed,glow,fH,tH,perpOff){
+  const dx=to.x-from.x,dy=to.y-from.y,len=Math.sqrt(dx*dx+dy*dy);
+  if(len<1)return;
+  const nx=dx/len,ny=dy/len;
+  const px=-ny,py=nx; // perpendicular
+  const sx=from.x+nx*fH+px*perpOff, sy=from.y+ny*fH+py*perpOff;
+  const ex=to.x  -nx*tH+px*perpOff, ey=to.y  -ny*tH+py*perpOff;
+  ctx.save();
+  if(glow){ctx.shadowColor=color;ctx.shadowBlur=12;}
+  ctx.strokeStyle=color;ctx.lineWidth=width;
+  if(dashed)ctx.setLineDash([6,4]);else ctx.setLineDash([]);
+  ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(ex,ey);ctx.stroke();
+  ctx.setLineDash([]);
+  const angle=Math.atan2(ey-sy,ex-sx);
+  ctx.fillStyle=color;
+  ctx.beginPath();
+  ctx.moveTo(ex,ey);
+  ctx.lineTo(ex-10*Math.cos(angle-0.38),ey-10*Math.sin(angle-0.38));
+  ctx.lineTo(ex-10*Math.cos(angle+0.38),ey-10*Math.sin(angle+0.38));
+  ctx.closePath();ctx.fill();ctx.restore();
+}
+
+// ═══════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════
+window.addEventListener('load',()=>{
+  const c=document.getElementById('rag-canvas');
+  c.addEventListener('mousedown',onPD);
+  c.addEventListener('mousemove',onPM);
+  c.addEventListener('mouseup',onPU);
+  c.addEventListener('mouseleave',onPU);
+  c.addEventListener('touchstart',onPD,{passive:false});
+  c.addEventListener('touchmove',onPM,{passive:false});
+  c.addEventListener('touchend',onPU);
+  c.addEventListener('touchcancel',onPU);
+  buildPresets();
+  loadPreset('deadlock');
+  setTimeout(()=>{initPositions();drawRAG();},120);
+});
+window.addEventListener('resize',()=>{drawRAG(lastCycles);});
+</script>
+</body>
+</html>
