@@ -900,7 +900,7 @@ window.addEventListener('load',()=>{
   loadPreset('deadlock');
   setTimeout(()=>{initPositions();drawRAG();},120);
 });
-
+window.addEventListener('resize',()=>{drawRAG(lastCycles);});
 </script>
 </body>
 </html>
